@@ -1,7 +1,7 @@
 /*
  * Developed by Claudio André <claudioandre.br at gmail.com> in 2012
  *
- * More information at http://openwall.info/wiki/john/OpenCL-SHA-256
+ * More information at https://openwall.info/wiki/john/OpenCL-SHA-256
  *
  * Copyright (c) 2012-2015 Claudio André <claudioandre.br at gmail.com>
  * This program comes with ABSOLUTELY NO WARRANTY; express or implied.
@@ -266,7 +266,9 @@ inline void sha256_digest_move(sha256_ctx * ctx,
                                uint32_t   * result,
                                const int size) {
 
+#if !__POCL__
     #pragma unroll
+#endif
     for (int i = 0; i < size; i++)
         result[i] = SWAP32(ctx->H[i]);
 }

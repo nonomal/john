@@ -72,6 +72,7 @@ static struct fmt_tests o5logon_tests[] = {
 	{"$o5logon$A10D52C1A432B61834F4B0D9592F55BD0DA2B440AEEE1858515A646683240D24A61F0C9366C63E93D629292B7891F44A*878C0B92D61A594F2680", "m3ow00"},
 	{"$o5logon$52696131746C356643796B6D716F46474444787745543263764B725A6D756A69E46DE32AFBB33E385C6D9C7031F4F2B9*3131316D557239736A65", "123456"},
 	{"$o5logon$4336396C304B684638634450576B30397867704F54766D71494F676F5A5A386F09F4A10B5908B3ED5B1D6878A6C78751*573167557661774E7271", ""},
+	{"$o5logon$4D04DBD23D103F05D9B57EB6EC14D83A0A468AB906EAC907D3A8C796573E5F34BC15F0ECBC9EAC0350A38A663A368233*442192E518F6F43D7CF7*D3963B6AAED39C231BD5C92A10C0F146CA4784D1503A9B97598B31D33406390B7CA4F8B3EE5406A54C1842E4E63D1220*192AB7C9BA21C883824CF3D5BA073AC1129FD841E0AF6DF522C7EBDC52783CB8B97B792BFB6D9D743C7F4376FF0E7F93", "password1234567890"},
 	{NULL}
 };
 
@@ -87,12 +88,8 @@ static struct custom_salt {
 	int pw_len;                              /* AUTH_PASSWORD length (blocks) */
 } *cur_salt;
 
-static aes_fptr_cbc aesDec, aesEnc;
-
 static void init(struct fmt_main *self)
 {
-	static char Buf[128];
-
 	omp_autotune(self, OMP_SCALE);
 
 	saved_key = mem_calloc(self->params.max_keys_per_crypt,
@@ -101,14 +98,6 @@ static void init(struct fmt_main *self)
 	                       sizeof(*saved_len));
 	cracked = mem_calloc(self->params.max_keys_per_crypt,
 	                     sizeof(*cracked));
-
-	if (!*aesDec) {
-		aesDec = get_AES_dec192_CBC();
-		aesEnc = get_AES_enc192_CBC();
-		sprintf(Buf, "%s %s", self->params.algorithm_name,
-		        get_AES_type_string());
-		self->params.algorithm_name=Buf;
-	}
 }
 
 static void done(void)
@@ -143,7 +132,7 @@ static int valid(char *ciphertext, struct fmt_main *self)
 	if ((p = strtokm(NULL, "*"))) {	/* client's encrypted password */
 		int len = hexlenu(p, &extra);
 
-		if (extra || len < 64 || len % 32 || len > 2 * PLAINTEXT_LENGTH + 16)
+		if (extra || len < 64 || len % 32 || len > 2 * PLAINTEXT_LENGTH + 32)
 			goto err;
 		if ((p = strtokm(NULL, "*")) == NULL)	/* client's sesskey */
 			goto err;
@@ -214,6 +203,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 	for (index = 0; index < count; index++) {
 		unsigned char key[24];
 		unsigned char iv[16];
+		AES_KEY akey;
 		SHA_CTX ctx;
 
 		SHA1_Init(&ctx);
@@ -235,10 +225,12 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 			if (cur_salt->pw_len == blen) {
 				memset(iv, 0, 16);
-				aesDec(cur_salt->ct, s_secret, key, 3, iv);
+				AES_set_decrypt_key(key, 192, &akey);
+				AES_cbc_encrypt(cur_salt->ct, s_secret, 48, &akey, iv, AES_DECRYPT);
 
 				memset(iv, 0, 16);
-				aesDec(cur_salt->csk, c_secret, key, 3, iv);
+				AES_set_decrypt_key(key, 192, &akey);
+				AES_cbc_encrypt(cur_salt->csk, c_secret, 48, &akey, iv, AES_DECRYPT);
 
 				for (i = 0; i < 24; i++)
 					combined_sk[i] = s_secret[16 + i] ^ c_secret[16 + i];
@@ -251,8 +243,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 				MD5_Final(final_key + 16, &ctx);
 
 				memset(iv, 0, 16);
-				aesDec(cur_salt->pw, password, final_key,
-				       cur_salt->pw_len + 1, iv);
+				AES_set_decrypt_key(final_key, 192, &akey);
+				AES_cbc_encrypt(cur_salt->pw, password, (cur_salt->pw_len + 1) * 16, &akey, iv, AES_DECRYPT);
 
 				if (!memcmp(dec_pw, saved_key[index], saved_len[index]))
 				{
@@ -281,7 +273,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 			unsigned char pt[16];
 
 			memcpy(iv, cur_salt->ct + 16, 16);
-			aesDec(cur_salt->ct + 32, pt, key, 1, iv);
+			AES_set_decrypt_key(key, 192, &akey);
+			AES_cbc_encrypt(cur_salt->ct + 32, pt, 16, &akey, iv, AES_DECRYPT);
 
 			if (!memcmp(pt + 8, "\x08\x08\x08\x08\x08\x08\x08\x08", 8))
 			{
