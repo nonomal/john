@@ -16,7 +16,6 @@ import os
 import socket
 import struct
 import sys
-import time
 
 import logging
 l = logging.getLogger("scapy.runtime")
@@ -24,6 +23,7 @@ l.setLevel(49)
 
 try:
     from scapy.all import *
+    from scapy.layers.http import HTTPRequest
 except ImportError:
     sys.stderr.write("Please install 'scapy' package for Python, running 'pip install --user scapy' should work\n")
     sys.exit(1)
@@ -179,6 +179,9 @@ def pcap_parser_vtp(fname):
 
 
 def pcap_parser_vrrp(fname):
+    """
+    Parse packets of the Virtual Router Redundancy Protocol (VRRP).
+    """
 
     pcap = rdpcap(fname)
 
@@ -582,86 +585,23 @@ def pcap_parser_isis(fname):
 
     f.close()
 
-"""
-
-UDP payload (HSRP message) format (https://www.ietf.org/rfc/rfc2281.txt)
-
-                          1                   2                   3
-
-   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |   Version     |   Op Code     |     State     |   Hellotime   |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |   Holdtime    |   Priority    |     Group     |   Reserved    |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Authentication  Data                     |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Authentication  Data                     |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Virtual IP Address                       |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-
-# from scapy sources
-if len(hsrp-payload) > 28:
-    MD5 authentication is being used
-
-class HSRPmd5(Packet):
-    name = "HSRP MD5 Authentication"
-    fields_desc = [
-        ByteEnumField("type", 4, {4: "MD5 authentication"}),
-        ByteField("len", None),
-        ByteEnumField("algo", 0, {1: "MD5"}),
-        ByteField("padding", 0x00),
-        XShortField("flags", 0x00),
-        IPField("sourceip", None),
-        XIntField("keyid", 0x00),  # 14 bytes here
-        StrFixedLenField("authdigest", "\00" * 16, 16)]
-
-"""
-
 
 def pcap_parser_hsrp(fname):
+    """
+    Parse packets of the Hot Standby Router Protocol (HSRP).
+    https://www.rfc-editor.org/rfc/rfc2281
+    """
 
-    f = open(fname, "rb")
-    pcap = dpkt.pcap.Reader(f)
+    pcap = rdpcap(fname)
 
-    for _, buf in pcap:
-        eth = dpkt.ethernet.Ethernet(buf)
-        if eth.type == dpkt.ethernet.ETH_TYPE_IP:
-            ip = eth.data
-
-            if ip.v != 4:  # IPv6 is a fad
+    for pkt in pcap:
+        if pkt.haslayer(HSRPmd5):
+            pkt = pkt['HSRP']
+            if pkt['HSRPmd5'].type != 4:
                 continue
-
-            if ip.p != dpkt.ip.IP_PROTO_UDP:
-                continue
-
-            udp = ip.data
-            hsrp = udp.data
-
-            if udp.dport != 1985:  # is this HSRP traffic?
-                continue
-
-            if ord(hsrp[0]) != 0:  # HSRP version
-                continue
-
-            if len(hsrp) <= 28:  # doesn't use MD5 authentication
-                continue
-
-            if len(hsrp) != 50:  # 20 bytes HSRP + 30 bytes for the MD5 authentication payload
-                continue
-
-            auth_type = ord(hsrp[20])
-            if auth_type != 4:
-                continue
-
-            h = hsrp[-16:].encode("hex")  # MD5 hash
-            # 20 bytes (HSRP) + 14 (till "keyid") + zero padding (double-check this) to make 50 bytes!
-            salt = hsrp.encode("hex")[:68] + ("\x00" * (50 - 20 - 14)).encode("hex")
-            print("$hsrp$%s$%s" % (salt, h))
-
-    f.close()
+            h = bytes(pkt['HSRPmd5'].authdigest)
+            salt = bytes(pkt)[:34] + b"\x00"*16
+            print("$hsrp$%s$%s" % (hexlify(salt).decode('ascii'), hexlify(h).decode('ascii')))
 
 
 def pcap_parser_hsrp_v2(fname):
@@ -956,54 +896,43 @@ def pcap_parser_wlccp(fname):
     f.close()
 
 
-def endian(s):
-    ret = ""
-    for i in range(0, len(s), 2):
-        ret += s[i + 1] + s[i]
-    return ret
-
-
-def process_hash(uid, nonce, sha1):
-    if len(nonce) == 0:
-        return
-    uid = int(endian(uid[::-1]), 16)
-    print("%s:$dynamic_24$%s$HEX$%s" % (uid, sha1, nonce))
-
-
-def handle_gg_login105(payload, nonce):
+def pcap_parser_gadu(fname):
     """
-    GG_LOGIN105 stores uid as hex encoded ASCII. 16th byte is the number of digits in uid.
-    uid begins at 17th byte. sha1 hash is separated from last digit of uid by two bytes.
+    Parse packets of the Gadu-Gadu instant messenger.
     """
-    digits = int(payload[30:32], 16)
-    uid = payload[32:32 + 2*digits].decode("hex")
-    offset = 32 + 2*digits + 4
-    sha1 = payload[offset:offset + 40]
-    print("%s:$dynamic_24$%s$HEX$%s" % (uid, sha1, nonce))
 
-
-def pcap_parser_gadu(pcapfile):
-    try:
-        packets = rdpcap(pcapfile)
-    except:
-        sys.stderr.write("%s is not a .pcap file\n" % pcapfile)
-        return
+    pcap = rdpcap(fname)
 
     ports = [8074]
     nonce = ""
-    for pkt in packets:
-        if TCP in pkt and (pkt[TCP].dport in ports or pkt[TCP].sport in ports):
-            payload = str(pkt[TCP].payload).encode('hex')
-            if payload[:8] == '01000000':  # GG_WELCOME
-                nonce = payload[16:]
-            if payload[:8] == '31000000':  # GG_LOGIN80
-                hashtype = payload[28:30]
-                if hashtype == "02":
-                    uid = payload[16:24]
-                    sha1 = payload[30:70]
-                    process_hash(uid, nonce, sha1)
-            if payload[:8] == '83000000':  # GG_LOGIN105
-                handle_gg_login105(payload, nonce)
+    for pkt in pcap:
+        if not TCP in pkt:
+            continue
+        if not pkt[TCP].dport in ports and not pkt[TCP].sport in ports:
+            continue
+
+        payload = hexlify(bytes(pkt[TCP].payload)).decode('ascii')
+        if payload[:8] == '01000000':  # GG_WELCOME
+            nonce = payload[16:]
+        if payload[:8] == '31000000':  # GG_LOGIN80
+            hashtype = payload[28:30]
+            if hashtype == "02":
+                uid = payload[16:24]
+                sha1 = payload[30:70]
+                if len(nonce) == 0:
+                    continue
+                # swap endianness
+                uid = ''.join([uid[i:i+2] for i in range(0, len(uid), 2)][::-1])
+                uid = int(uid, 16)
+                print("%s:$dynamic_24$%s$HEX$%s" % (uid, sha1, nonce))
+        if payload[:8] == '83000000':  # GG_LOGIN105
+            # GG_LOGIN105 stores uid as hex encoded ASCII. 16th byte is the number of digits in uid.
+            # uid begins at 17th byte. sha1 hash is separated from last digit of uid by two bytes.
+            digits = int(payload[30:32], 16)
+            uid = payload[32:32 + 2*digits].decode("hex")
+            offset = 32 + 2*digits + 4
+            sha1 = payload[offset:offset + 40]
+            print("%s:$dynamic_24$%s$HEX$%s" % (uid, sha1, nonce))
 
 
 def pcap_parser_eigrp(fname):
@@ -1327,49 +1256,39 @@ def pcap_parser_tsig(fname):
     f.close()
 
 
-# http://dpkt.readthedocs.io/en/latest/print_http_requests.html
-def pcap_parser_htdigest(fname):
-    f = open(fname, "rb")
-    pcap = dpkt.pcap.Reader(f)
+def pcap_parser_http_authorization(fname):
+    """
+    Parse the Authorization header of HTTP packets.
+    Supports Digest Auth and prints hashes in $response$ format.
+    Also outputs decoded Basic Auth credentials on stderr.
+    """
 
-    # For each packet in the pcap process the contents
-    for timestamp, buf in pcap:
-        # Unpack the Ethernet frame (mac src/dst, ethertype)
-        try:
-           eth = dpkt.ethernet.Ethernet(buf)
-        except:
+    pcap = rdpcap(fname)
+
+    for pkt in pcap:
+        if not HTTPRequest in pkt:
+            continue
+        auth_header = pkt["HTTPRequest"].Authorization
+        if not auth_header:
             continue
 
-        # Make sure the Ethernet data contains an IP packet
-        if eth.type == dpkt.ethernet.ETH_TYPE_IP or eth.type == dpkt.ethernet.ETH_TYPE_IP6:
-            # Now grab the data within the Ethernet frame (the IP packet)
-            ip = eth.data
+        if auth_header.startswith(b"Basic "):
+            # directly print decoded Basic Auth credentials to stderr, no cracking necessary
+            basic_auth = base64.b64decode(auth_header[6:]).decode("UTF-8")
+            sys.stderr.write("FOUND HTTP BASIC AUTH: %s\n" % basic_auth)
 
-            # Check for TCP in the transport layer
-            if isinstance(ip.data, dpkt.tcp.TCP):
-
-                # Set the TCP data
-                tcp = ip.data
-
-                # Now see if we can parse the contents as a HTTP request
-                try:
-                    request = dpkt.http.Request(tcp.data)
-                except (dpkt.dpkt.NeedData, dpkt.dpkt.UnpackError):
-                    continue
-
-                if "authorization" in request.headers:
-                    value = request.headers["authorization"]
-                    if "qop" in value and "response" in value:
-                        import urllib2
-                        items = urllib2.parse_http_list(value)
-                        opts = urllib2.parse_keqv_list(items)
-                        user = opts['Digest username']
-                        print("%s:$response$%s$%s$%s$%s$%s$%s$%s$%s$%s" %
-                                (user, opts["response"], user, opts["realm"],
-                                    request.method, opts["uri"], opts["nonce"],
-                                    opts["nc"], opts["cnonce"], opts["qop"]))
-
-    f.close()
+        if auth_header.startswith(b"Digest "):
+            try:
+                from urllib.request import parse_http_list, parse_keqv_list
+            except ImportError:
+                # Python 2
+                from urllib2 import parse_http_list, parse_keqv_list
+            items = parse_http_list(auth_header[7:].decode("UTF-8"))
+            opts = parse_keqv_list(items)
+            print("%s:$response$%s$%s$%s$%s$%s$%s$%s$%s$%s" %
+                    (opts['username'], opts["response"], opts['username'], opts["realm"],
+                        pkt["HTTPRequest"].Method.decode('ascii'), opts["uri"],
+                        opts["nonce"], opts["nc"], opts["cnonce"], opts["qop"]))
 
 
 ############################################################
@@ -1383,7 +1302,6 @@ if __name__ == "__main__":
 
     # advertise what is not handled
     sys.stderr.write("Note: This program does not have the functionality of wpapcap2john, SIPdump, eapmd5tojohn, and vncpcap2john programs which are included with JtR Jumbo.\n\n")
-    time.sleep(1)
 
     for i in range(1, len(sys.argv)):
         try:
@@ -1453,7 +1371,7 @@ if __name__ == "__main__":
             pcap_parser_tsig(sys.argv[i])
         except:
             pass
-        pcap_parser_htdigest(sys.argv[i])
+        pcap_parser_http_authorization(sys.argv[i])
         try:
             pcap_parser_s7(sys.argv[i])
         except:
