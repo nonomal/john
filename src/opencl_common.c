@@ -6,7 +6,7 @@
  * This software is
  * Copyright (c) 2010-2012 Samuele Giovanni Tonon <samu at linuxasylum dot net>
  * Copyright (c) 2010-2013 Lukas Odzioba <ukasz@openwall.net>
- * Copyright (c) 2010-2019 magnum
+ * Copyright (c) 2010-2022 magnum
  * Copyright (c) 2012-2015 Claudio André <claudioandre.br at gmail.com>
  *
  * and is hereby released to the general public under the following terms:
@@ -61,13 +61,9 @@
 
 #define LOG_SIZE 1024*16
 
-// If we are a release build, only output OpenCL build log if
-// there was a fatal error (or --verbosity was increased).
-#ifdef JTR_RELEASE_BUILD
+/* Only output OpenCL build log if there was a fatal error
+ * (or --verbosity was increased). */
 #define LOG_VERB VERB_LEGACY
-#else
-#define LOG_VERB VERB_DEFAULT
-#endif
 
 /* Common OpenCL variables */
 int platform_id;
@@ -258,13 +254,13 @@ void opencl_driver_value(int sequential_id, int *major, int *minor)
 		sizeof(dname), dname, NULL), "clGetDeviceInfo for CL_DRIVER_VERSION");
 
 	p = dname;
-	while (*p && !isdigit((int)*p))
+	while (*p && !isdigit((int)(unsigned char)*p))
 		p++;
 	if (*p) {
 		*major = atoi(p);
-		while (*p && isdigit((int)*p))
+		while (*p && isdigit((int)(unsigned char)*p))
 			p++;
-		while (*p && !isdigit((int)*p))
+		while (*p && !isdigit((int)(unsigned char)*p))
 			p++;
 		if (*p) {
 			*minor = atoi(p);
@@ -300,8 +296,7 @@ static char *remove_spaces(char *str) {
 
 static char *opencl_driver_info(int sequential_id)
 {
-	static char buf[64 + MAX_OCLINFO_STRING_LEN];
-	char dname[MAX_OCLINFO_STRING_LEN], tmp[sizeof(buf)], set[64];
+	char dname[MAX_OCLINFO_STRING_LEN], tmp[64 + MAX_OCLINFO_STRING_LEN], set[64];
 	static char output[sizeof(tmp) + sizeof(dname)];
 	char *name, *recommendation = NULL;
 	int major = 0, minor = 0, conf_major = 0, conf_minor = 0, found;
@@ -312,7 +307,7 @@ static char *opencl_driver_info(int sequential_id)
 		sizeof(dname), dname, NULL), "clGetDeviceInfo for CL_DRIVER_VERSION");
 
 	opencl_driver_value(sequential_id, &major, &minor);
-	name = buf;
+	name = "";
 
 	if ((list = cfg_get_list("List.OpenCL:", "Drivers")))
 	if ((line = list->head))
@@ -349,14 +344,7 @@ static char *opencl_driver_info(int sequential_id)
 
 	if (gpu_amd(device_info[sequential_id]) &&
 	    get_platform_vendor_id(get_platform_id(sequential_id)) == DEV_AMD) {
-
-		if (major < 1912)
-			snprintf(buf, sizeof(buf), "%s - Catalyst %s", dname, name);
-		else if (major < 2500)
-			snprintf(buf, sizeof(buf), "%s - Crimson %s", dname, name);
-		else
-			snprintf(buf, sizeof(buf), "%s - AMDGPU-Pro %s", dname, name);
-		snprintf(tmp, sizeof(tmp), "%s", buf);
+		snprintf(tmp, sizeof(tmp), "%s%s%s", dname, *name? " - ": "", name);
 	} else
 		snprintf(tmp, sizeof(tmp), "%s", dname);
 
@@ -1154,7 +1142,7 @@ static char *get_build_opts(int sequential_id, const char *opts)
 #ifdef __APPLE__
 	        "-D__OS_X__ ",
 #else
-	        (options.verbosity >= VERB_MAX &&
+	        (options.verbosity >= VERB_LEGACY &&
 	         gpu_nvidia(device_info[sequential_id])) ?
 	         "-cl-nv-verbose " : "",
 #endif
@@ -1285,20 +1273,28 @@ void opencl_build(int sequential_id, const char *opts, int save, const char *fil
 	log_event("- build time: %ss", ns2string(end - start));
 
 	// Report build errors and warnings
+	// Nvidia may return a single '\n' that we ignore
 	if (build_code != CL_SUCCESS) {
 		// Give us info about error and exit (through HANDLE_CLERROR)
 		if (options.verbosity <= VERB_LEGACY)
 			fprintf(stderr, "Options used: %s %s\n",
 			        build_opts, kernel_source_file);
-		if (strlen(build_log) > 1)
+		if (strlen(build_log) > 1) {
+			fprintf(stderr, "Build time: %ss\n", ns2string(end - start));
 			fprintf(stderr, "Build log: %s\n", build_log);
+		} else if (options.verbosity >= VERB_MAX)
+			fprintf(stderr, "Build time: %ss\n", ns2string(end - start));
 		fprintf(stderr, "Error building kernel %s. DEVICE_INFO=%d\n",
 		        kernel_source_file, device_info[sequential_id]);
 		HANDLE_CLERROR(build_code, "clBuildProgram");
 	}
-	// Nvidia may return a single '\n' that we ignore
-	else if (options.verbosity >= LOG_VERB && strlen(build_log) > 1)
-		fprintf(stderr, "Build log: %s\n", build_log);
+	else if (options.verbosity >= LOG_VERB) {
+		if (strlen(build_log) > 1) {
+			fprintf(stderr, "Build time: %ss\n", ns2string(end - start));
+			fprintf(stderr, "Build log: %s\n", build_log);
+		} else if (options.verbosity >= VERB_MAX)
+			fprintf(stderr, "Build time: %ss\n", ns2string(end - start));
+	}
 
 	MEM_FREE(build_log);
 	MEM_FREE(build_opts);
@@ -1398,6 +1394,8 @@ cl_int opencl_build_from_binary(int sequential_id, cl_program *program, const ch
 		fprintf(stderr, "Binary Build log: %s\n", build_log);
 
 	log_event("- build time: %ss", ns2string(end - start));
+	if (options.verbosity >= VERB_MAX)
+		fprintf(stderr, "Build time: %ss\n", ns2string(end - start));
 	MEM_FREE(build_log);
 	return CL_SUCCESS;
 }
@@ -1557,7 +1555,7 @@ static cl_ulong gws_test(size_t gws, unsigned int rounds, int sequential_id)
 	for (i = 0; (*multi_profilingEvent[i]); i++)
 		number_of_events++;
 
-	//** Get execution time **//
+	/* Get execution time */
 	for (i = 0; i < number_of_events; i++) {
 		char mult[32] = "";
 
@@ -1671,9 +1669,9 @@ void opencl_init_auto_setup(int p_default_value, int p_hash_loops,
 	autotune_real_db = db && db->real && db->real == db;
 	autotune_salts = db ? db->salts : NULL;
 
-	/* We can't process more than 4G keys per crypt() */
+	/* We can't process more than 2G-1 keys per crypt_all() */
 	if (mask_int_cand.num_int_cand > 1)
-		gws_limit = MIN(gws_limit, 0x100000000ULL / mask_int_cand.num_int_cand / ocl_v_width);
+		gws_limit = MIN(gws_limit, 0x7fffffffU / mask_int_cand.num_int_cand / ocl_v_width);
 }
 
 void opencl_find_best_lws(size_t group_size_limit, int sequential_id,
@@ -2157,22 +2155,22 @@ static void load_device_info(int sequential_id)
 	else if (device == CL_DEVICE_TYPE_ACCELERATOR)
 		device_info[sequential_id] = DEV_ACCELERATOR;
 
-	device_info[sequential_id] += get_vendor_id(sequential_id);
-	device_info[sequential_id] += get_processor_family(sequential_id);
-	device_info[sequential_id] += get_byte_addressable(sequential_id);
+	device_info[sequential_id] |= get_vendor_id(sequential_id);
+	device_info[sequential_id] |= get_processor_family(sequential_id);
+	device_info[sequential_id] |= get_byte_addressable(sequential_id);
 
 	get_compute_capability(sequential_id, &major, &minor);
 
 	if (major) {
-		device_info[sequential_id] += (major == 2 ? DEV_NV_C2X : 0);
-		device_info[sequential_id] +=
+		device_info[sequential_id] |= (major == 2 ? DEV_NV_C2X : 0);
+		device_info[sequential_id] |=
 		    (major == 3 && minor == 0 ? DEV_NV_C30 : 0);
-		device_info[sequential_id] +=
+		device_info[sequential_id] |=
 		    (major == 3 && minor == 2 ? DEV_NV_C32 : 0);
-		device_info[sequential_id] +=
+		device_info[sequential_id] |=
 		    (major == 3 && minor == 5 ? DEV_NV_C35 : 0);
-		device_info[sequential_id] += (major == 5 ? DEV_NV_MAXWELL : 0);
-		device_info[sequential_id] += (major >= 5 ? DEV_NV_MAXWELL_PLUS : 0);
+		device_info[sequential_id] |= (major == 5 ? DEV_NV_MAXWELL : 0);
+		device_info[sequential_id] |= (major >= 5 ? DEV_NV_MAXWELL_PLUS : 0);
 	}
 }
 
@@ -2535,7 +2533,7 @@ void get_compute_capability(int sequential_id, unsigned int *major,
 	                CL_DEVICE_COMPUTE_CAPABILITY_MINOR_NV,
 	                sizeof(cl_uint), minor, NULL);
 
-	if (!major) {
+	if (!*major) {
 /*
  * Apple, VCL and some other environments don't expose CL_DEVICE_COMPUTE_CAPABILITY_MINOR_NV
  * so we need this crap - which is incomplete, best effort matching.
@@ -2656,8 +2654,7 @@ cl_uint get_processor_family(int sequential_id)
 	if (*dname)
 		strlwr(&dname[1]);
 
-	if gpu_amd
-	(device_info[sequential_id]) {
+	if (gpu_amd(device_info[sequential_id])) {
 
 		if ((strstr(dname, "Cedar") ||  //AMD Radeon VLIW5
 		        strstr(dname, "Redwood") || strstr(dname, "Juniper")
